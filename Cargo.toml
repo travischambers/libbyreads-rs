@@ -43,6 +43,9 @@ ssr = [
     "dep:tracing",
 ]
 
+[profile.dev]
+debug = true
+
 # Defines a size-optimized profile for the WASM bundle in release mode
 [profile.wasm-release]
 inherits = "release"
@@ -112,3 +115,8 @@ lib-default-features = false
 #
 # Optional. Defaults to "release".
 lib-profile-release = "wasm-release"
+
+# The target triple to use when compiling the bin target
+#
+# Optional. Env: LEPTOS_BIN_TARGET_TRIPLE
+bin-target-triple = "x86_64-unknown-linux-gnu"
