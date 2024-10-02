@@ -1,7 +1,9 @@
+#[cfg(feature = "ssr")]
 use tracing::info;
 
 #[cfg(feature = "ssr")]
 use tokio;
+
 use std::time::Instant;
 
 use crate::error_template::{AppError, ErrorTemplate};
@@ -31,8 +33,6 @@ pub struct GoodreadsBook {
     title: String,
     author: String,
     // date_added: String,
-    availability: Option<BookAvailability>,
-    libby_search_url: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -56,9 +56,10 @@ pub struct LibbyBook {
     libby_search_url: String,
     library_books: Vec<LibbyLibraryBook>,
 }
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Library {
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct SearchLibrary {
     system_name: String,
+    website_id: String,
     fulfillment_id: String,
     name: String,
     street: String,
@@ -66,7 +67,12 @@ pub struct Library {
     region: String,
     zip: String,
     branch_count: i32,
+}
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct Library {
+    search_library: SearchLibrary,
 
+    system_id: String,
     libby_base_url: String,
     overdrive_base_url: String,
 }
@@ -83,8 +89,11 @@ pub async fn get_goodreads_books(user_id: String) -> Result<Vec<GoodreadsBook>, 
     // TODO: get per_page to work. right now i always get 20
     // per_page=500 gives us 500 books at once. we could do more, but probably not necessary
     // TODO: make the shelf configurable via leptos multiselect dropdown
-    let url = format!("https://goodreads.com/review/list/{}?print=true&shelf=to-read", user_id);
-    info!(url=url, "Fetching initial page.");
+    let url = format!(
+        "https://goodreads.com/review/list/{}?print=true&shelf=to-read",
+        user_id
+    );
+    info!(url = url, "Fetching initial page.");
     // Parse the HTML document
     // the Html struct is not Sync, so we can't share it between threads
     // instead, we parse the document in a blocking tokio task
@@ -102,9 +111,13 @@ pub async fn get_goodreads_books(user_id: String) -> Result<Vec<GoodreadsBook>, 
             .filter_map(|element| element.text().collect::<String>().parse::<u32>().ok())
             .max()
             .unwrap_or(1); // If there are no pagination links, there is only one page
-        info!(total_pages=last_page, "Parsed number of pages from initial page.");
+        info!(
+            total_pages = last_page,
+            "Parsed number of pages from initial page."
+        );
         last_page
-    }).await?;
+    })
+    .await?;
 
     let initial_page_duration = start.elapsed();
     // Create async tasks for each page
@@ -113,7 +126,7 @@ pub async fn get_goodreads_books(user_id: String) -> Result<Vec<GoodreadsBook>, 
         let books = Arc::clone(&books); // Clone the Arc for each task
         let client = Client::new();
         let page_url = format!("{}&page={}", url, page_number);
-        info!(url=page_url, "Fetching page at url.");
+        info!(url = page_url, "Fetching page at url.");
 
         // Spawn a new async task to fetch and parse the page
         let task = tokio::task::spawn(async move {
@@ -159,8 +172,6 @@ pub async fn get_goodreads_books(user_id: String) -> Result<Vec<GoodreadsBook>, 
                             title,
                             author,
                             // date_added,
-                            availability: None,
-                            libby_search_url: None,
                         };
 
                         // Add the book to the shared vector
@@ -178,7 +189,6 @@ pub async fn get_goodreads_books(user_id: String) -> Result<Vec<GoodreadsBook>, 
         task.await?;
     }
 
-
     let books: std::sync::MutexGuard<'_, Vec<GoodreadsBook>> = books.lock().unwrap();
     let duration = start.elapsed();
     info!(initial_page_load_time=?initial_page_duration, all_pages_load_time=?duration, total_pages=last_page, total_books=books.len(), "Finished fetching all Goodreads pages.");
@@ -186,39 +196,42 @@ pub async fn get_goodreads_books(user_id: String) -> Result<Vec<GoodreadsBook>, 
 }
 
 #[server(GetLibbyAvailability, "/libby-availability")]
-pub async fn get_libby_availability(book: GoodreadsBook, libs: Vec<Library>) -> Result<LibbyBook, ServerFnError> {
+pub async fn get_libby_availability(
+    book: GoodreadsBook,
+    search_libs: Vec<SearchLibrary>,
+) -> Result<LibbyBook, ServerFnError> {
     // TODO: search all configured libraries concurrently for each book
-    // libs.push(Library {
-    //     name: String::from("hawaii"),
-    //     libby_base_url: String::from("https://libbyapp.com/library/hawaii"),
-    //     overdrive_base_url: String::from("https://thunder.api.overdrive.com/v2/libraries/hawaii"),
-    // });
-    // libs.push(Library {
-    //     name: String::from("utah"),
-    //     libby_base_url: String::from("https://libbyapp.com/library/beehive"),
-    //     overdrive_base_url: String::from("https://thunder.api.overdrive.com/v2/libraries/beehive"),
-    // });
-    // libs.push(Library {
-    //     name: String::from("livermore"),
-    //     libby_base_url: String::from("https://libbyapp.com/library/livermore"),
-    //     overdrive_base_url: String::from("https://thunder.api.overdrive.com/v2/libraries/livermore"),
-    // });
-    // libs.push(Library {
-    //     name: String::from("edmonton"),
-    //     libby_base_url: String::from("https://libbyapp.com/library/epl"),
-    //     overdrive_base_url: String::from("https://thunder.api.overdrive.com/v2/libraries/epl"),
-    // });
-    // libs.push(Library {
-    //     name: String::from("georgia"),
-    //     libby_base_url: String::from("https://libbyapp.com/library/gadd"),
-    //     overdrive_base_url: String::from("https://thunder.api.overdrive.com/v2/libraries/gadd"),
-    // });
+    // libs is a vector of SearchLibrary structs, but we need to convert them to Library structs
+    // to do that, we need to fetch the system_id for each library
+    let mut libraries = Vec::new();
+    for search_lib in search_libs {
+        let system_id_url = format!(
+            "https://thunder.api.overdrive.com/v2/libraries/?websiteid={}",
+            search_lib.website_id
+        );
+        let client = Client::new();
+        let library_json = client.get(&system_id_url).send().await?.text().await?;
+        let library_value: Value = serde_json::from_str(&library_json)?;
+        let system_id = library_value["items"][0]["id"].as_str().unwrap();
+        let libby_base_url = format!("https://libbyapp.com/library/{}", system_id);
+        let overdrive_base_url = format!(
+            "https://thunder.api.overdrive.com/v2/libraries/{}",
+            system_id
+        );
+        libraries.push(Library {
+            search_library: search_lib,
+            system_id: system_id.to_string(),
+            libby_base_url: libby_base_url,
+            overdrive_base_url: overdrive_base_url,
+        });
+    }
+
     let client = Client::new();
     let mut libby_library_books = Vec::new();
     let query = format!("{} {}", book.title, book.author);
     let url_safe_query = encode(&query);
 
-    for library in &libs {
+    for library in &libraries {
         let libby_search_url: String = format!(
             "{}/search/query-{}/page-1",
             library.libby_base_url, url_safe_query
@@ -226,19 +239,26 @@ pub async fn get_libby_availability(book: GoodreadsBook, libs: Vec<Library>) -> 
         // TODO: make these formats configurable via leptos multiselect dropdown
         // let format_str: String = "format=ebook-overdrive,ebook-media-do,ebook-overdrive-provisional,audiobook-overdrive,audiobook-overdrive-provisional,magazine-overdrive".to_string();
         let format_str: String =
-        "format=audiobook-overdrive,audiobook-overdrive-provisional".to_string();
+            "format=audiobook-overdrive,audiobook-overdrive-provisional".to_string();
         let overdrive_url = format!(
             "{}/media?query={}&{}&perPage=24&page=1&truncateDescription=false&x-client-id=dewey",
-            library.overdrive_base_url, 
-            url_safe_query,
-            format_str,
+            library.overdrive_base_url, url_safe_query, format_str,
         );
-        info!("Searching for book: {} by {} at {}", book.title, book.author, library.name);
+        info!(
+            "Searching for book: {} by {} at {}",
+            book.title, book.author, library.search_library.system_name
+        );
+        info!(libby_search_url = libby_search_url, "Libby search URL.");
 
         // Fetch the json from overdrive, then check the items array until we find a title that matches the book title
 
         // Fetch the page content
-        let response = client.get(overdrive_url.clone()).send().await?.text().await?;
+        let response = client
+            .get(overdrive_url.clone())
+            .send()
+            .await?
+            .text()
+            .await?;
 
         // Parse the JSON document
         let json: Value = serde_json::from_str(&response).unwrap();
@@ -250,13 +270,10 @@ pub async fn get_libby_availability(book: GoodreadsBook, libs: Vec<Library>) -> 
             let is_available: bool = item["isAvailable"].as_bool().unwrap();
             let is_holdable: bool = item["isHoldable"].as_bool().unwrap();
             let cover: &str = item["covers"]["cover150Wide"]["href"].as_str().unwrap();
-            info!("Found book in overdrive: {} by {} at {}\n", title, author, library.name);
 
             if title.to_lowercase() == book.title.to_lowercase()
                 && author.to_lowercase() == book.author.to_lowercase()
             {
-                // book.availability = Some(BookAvailability::Available);
-                // book.libby_search_url = Some(libby_search_url.to_string());
                 let libby_library_book = LibbyLibraryBook {
                     cover: cover.to_string(),
                     title: title.to_string(),
@@ -271,7 +288,10 @@ pub async fn get_libby_availability(book: GoodreadsBook, libs: Vec<Library>) -> 
             }
         }
         if !book_found_at_library {
-            info!("Did not find book {} in libby at {}.", book.title, library.name);
+            info!(
+                "Did not find book {} in libby at {}.",
+                book.title, library.search_library.system_name
+            );
             info!("{}", libby_search_url);
             info!("{}\n", overdrive_url);
             libby_library_books.push(LibbyLibraryBook {
@@ -314,36 +334,52 @@ pub async fn get_libby_availability(book: GoodreadsBook, libs: Vec<Library>) -> 
 }
 
 #[server(GetLibraries, "/libraries")]
-pub async fn get_libraries(input: String) -> Result<Vec<Library>, ServerFnError> {
+pub async fn get_libraries(input: String) -> Result<Vec<SearchLibrary>, ServerFnError> {
     let client = Client::new();
     let url = format!("https://libbyapp.com/api/locate/autocomplete/{}", input);
     let response = client.get(&url).send().await?.text().await?;
     let json: Value = serde_json::from_str(&response).unwrap();
     let count = json["count"].as_i64().unwrap();
     let total = json["total"].as_i64().unwrap();
-    info!(search_input=input, count=count, total=total, "Searching for library.");
+    info!(
+        search_input = input,
+        count = count,
+        total = total,
+        "Searching for library."
+    );
     let branches = &json["branches"];
-    let mut libraries = Vec::<Library>::new();
+    let mut libraries = Vec::<SearchLibrary>::new();
     for branch in branches.as_array().unwrap_or(&vec![]) {
         // find the library system for this branch
         let system_name = branch["systems"][0]["name"].as_str().unwrap();
         // then check if this system is already in the libraries list
-        if let Some(library) = libraries.iter_mut().find(|lib| lib.system_name == system_name) {
+        if let Some(library) = libraries
+            .iter_mut()
+            .find(|lib| lib.system_name == system_name)
+        {
             // if it is in the list, increment the branch count
             library.branch_count += 1;
         } else {
             // if not, add it to the list
             let fulfillment_id = branch["systems"][0]["fulfillmentId"].as_str().unwrap();
 
+            let website_id = branch["systems"][0]["websiteId"]
+                .as_i64()
+                .unwrap()
+                .to_string();
+            info!(
+                system_name = system_name,
+                fulfillment_id = fulfillment_id,
+                "Found library system."
+            );
             let name = branch["name"].as_str().unwrap();
             let street = branch["address"].as_str().unwrap();
             let city = branch["city"].as_str().unwrap();
             let region = branch["region"].as_str().unwrap();
             let zip = branch["postalCode"].as_str().unwrap();
-            let libby_base_url = format!("https://libbyapp.com/library/{}", system_name);
-            let overdrive_base_url = format!("https://thunder.api.overdrive.com/v2/libraries/{}", system_name);
-            libraries.push(Library {
+            libraries.push(SearchLibrary {
                 system_name: system_name.to_string(),
+                website_id: website_id.to_string(),
                 fulfillment_id: fulfillment_id.to_string(),
                 name: name.to_string(),
                 street: street.to_string(),
@@ -351,13 +387,15 @@ pub async fn get_libraries(input: String) -> Result<Vec<Library>, ServerFnError>
                 region: region.to_string(),
                 zip: zip.to_string(),
                 branch_count: 1,
-                libby_base_url: libby_base_url,
-                overdrive_base_url: overdrive_base_url,
             });
         }
     }
 
-    let found_system_names = libraries.iter().map(|lib| lib.system_name.clone()).collect::<Vec<_>>().join(", ");
+    let found_system_names = libraries
+        .iter()
+        .map(|lib| lib.system_name.clone())
+        .collect::<Vec<_>>()
+        .join(", ");
     info!(num_systems=libraries.len(), found_system_names=?found_system_names, "Found library systems.");
     Ok(libraries)
 }
@@ -369,13 +407,13 @@ pub fn App() -> impl IntoView {
 
     view! {
 
-        // water 
+        // water
         <Stylesheet href="https://cdn.jsdelivr.net/npm/water.css@2/out/water.css" />
         // holiday
         // <Stylesheet href="https://cdn.jsdelivr.net/npm/holiday.css@0.11.2" />
-        
+
         // <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-    
+
         <Stylesheet id="leptos" href="/pkg/libbyreads-rs.css"/>
 
         // sets the document title
@@ -400,17 +438,22 @@ pub fn App() -> impl IntoView {
 }
 
 #[component]
-fn LibrarySelect(libraries: ReadSignal<Vec<Library>>, set_libraries: WriteSignal<Vec<Library>>) -> impl IntoView {
+fn LibrarySelect(
+    search_libraries: ReadSignal<Vec<SearchLibrary>>,
+    set_search_libraries: WriteSignal<Vec<SearchLibrary>>,
+    selected_libraries: ReadSignal<Vec<SearchLibrary>>,
+    set_selected_libraries: WriteSignal<Vec<SearchLibrary>>,
+) -> impl IntoView {
     let (search_input, set_search_input) = create_signal(String::new());
-
 
     let fetch_libraries = move |input: String| {
         spawn_local(async move {
             let trimmed_input = input.trim();
             if !trimmed_input.is_empty() {
                 match get_libraries(trimmed_input.to_string()).await {
-                    Ok(libs) => set_libraries.set(libs),
-                    Err(e) => info!("{}", e.to_string()),
+                    Ok(libs) => set_search_libraries.set(libs),
+                    //TODO: what to do on error here?
+                    Err(e) => {},
                 }
             }
         });
@@ -423,155 +466,199 @@ fn LibrarySelect(libraries: ReadSignal<Vec<Library>>, set_libraries: WriteSignal
     view! {
         <input
             type="text"
-            placeholder="Try a library name, your city, or zip code."
+            placeholder="Type a library name, your city, or zip code."
             on:input=move |e| set_search_input(event_target_value(&e))
-            style="width: 300px;" // Adjust the width as needed
+            style="width: 95%;" // Adjust the width as needed
         />
-        <ul>
-            {move || libraries.get().iter().map(|library| {
-            view! {
-                <li>{library.system_name.clone()}</li>
-            }
+        <table>
+            <thead>
+            <tr>
+                <th style="width: 70%">"Library"</th>
+                <th style="width: 30%">"Action"</th>
+            </tr>
+            </thead>
+            <tbody>
+            {move || search_libraries.get().iter().map(|library| {
+                let library_clone = library.clone();
+                let is_selected = selected_libraries.get().contains(&library_clone);
+                view! {
+                <tr>
+                    <td>{library.system_name.clone()}</td>
+                    <td>
+                    {if is_selected {
+                        view! {
+                        <button on:click=move |_| {
+                            set_selected_libraries.update(|selected| {
+                            if let Some(pos) = selected.iter().position(|x| *x == library_clone) {
+                                selected.remove(pos);
+                            }
+                            });
+                        }>"Remove"</button>
+                        }
+                    } else {
+                        view! {
+                        <button on:click=move |_| {
+                            set_selected_libraries.update(|selected| {
+                            if !selected.contains(&library_clone) {
+                                selected.push(library_clone.clone());
+                            }
+                            });
+                        }>"Add"</button>
+                        }
+                    }}
+                    </td>
+                </tr>
+                }
             }).collect::<Vec<_>>()}
-        </ul>
+            </tbody>
+        </table>
     }
 }
 
 #[component]
-fn HomePage() -> impl IntoView { 
+fn HomePage() -> impl IntoView {
     let (books, set_books) = create_signal(Vec::new());
-    let (sort_by, set_sort_by) = create_signal(String::from("title"));
+    let (sort_by, set_sort_by) = create_signal(String::from("availability"));
     let (sort_order, set_sort_order) = create_signal(String::from("asc"));
     let (user_id, set_user_id) = create_signal(String::new());
-    let (libraries, set_libraries) = create_signal(Vec::new());
+    let (search_libraries, set_search_libraries) = create_signal(Vec::<SearchLibrary>::new());
+    let (selected_libraries, set_selected_libraries) = create_signal(Vec::<SearchLibrary>::new());
+    let (libby_progress, set_libby_progress) = create_signal(0);
+    let (available_count, set_available_count) = create_signal(0);
+    let (holdable_count, set_holdable_count) = create_signal(0);
+    let (not_owned_count, set_not_owned_count) = create_signal(0);
+    let (availability, set_availability) = create_signal(Vec::new());
 
+    
     let fetch_books = move |_| {
         let user_id = user_id.get();
         spawn_local(async move {
             match get_goodreads_books(user_id).await {
                 Ok(fetched_books) => set_books.set(fetched_books),
-                Err(e) => {info!("{}", e.to_string())}, 
+                Err(e) => {
+                    //TODO: what to do on error here?
+                }
             }
         });
     };
 
-    let (availability, set_availability) = create_signal(Vec::new());
+    //TODO also update the user_id in the URL when a user enters it in the input field
+    let query_params = use_query_map();
+    //TODO: can't log this in the frontend because tracing::info is SSR only
+    // info!(query_params = ?query_params, "Params.");
+    let user_id_from_url = move || {
+        query_params.with(|query_params| query_params.get("user_id").cloned().unwrap_or_default())
+    };
+    //TODO: can't log this in the frontend because tracing::info is SSR only
+    // info!(user_id = user_id_from_url(), "User ID from URL.");
+    let user_id_from_url_value = user_id_from_url();
+    if !user_id_from_url_value.is_empty() {
+        set_user_id(user_id_from_url_value);
+        fetch_books(());
+    }
+
     let fetch_availability = move || {
+        set_libby_progress.update(|progress| *progress = 0);
+        set_available_count.update(|available| *available = 0);
+        set_holdable_count.update(|holdable| *holdable = 0);
+        set_not_owned_count.update(|not_owned| *not_owned = 0);
+        set_availability.update(|availability| availability.clear());
         let books = books.get().clone();
         for book in books.iter() {
             let book_clone = book.clone();
             spawn_local(async move {
-                match get_libby_availability(book_clone, libraries.get()).await {
+                match get_libby_availability(book_clone, selected_libraries.get()).await {
                     Ok(fetched_availability) => {
+                        let availability_clone = fetched_availability.clone();
                         set_availability.update(|availability| {
-                            availability.push(fetched_availability);
+                            availability.push(availability_clone);
                         });
+                        if fetched_availability.is_available {
+                            set_available_count.update(|available| *available += 1);
+                        } else if fetched_availability.is_holdable {
+                            set_holdable_count.update(|holdable| *holdable += 1);
+                        } else {
+                            set_not_owned_count.update(|not_owned| *not_owned += 1);
+                        }
                     }
-                    Err(e) => { info!("{}", e.to_string()) },
+                    Err(e) => {
+                        //TODO: what to do on error here?
+                    }
                 }
+                set_libby_progress.update(|progress| *progress += 1);
             });
         }
-        // print a count of is_available, is_holdable, and not_owned
-        let mut available_count = 0;
-        let mut holdable_count = 0;
-        let mut not_owned_count = 0;
-        for libby_book in availability.get().iter() {
-            if libby_book.is_available {
-                available_count += 1;
-            }
-            else if libby_book.is_holdable {
-                holdable_count += 1;
-            }
-            else {
-                not_owned_count += 1;
-            }
-        }
-        // print available books
-        info!("\n\nAvailable books: {}", available_count);
-        for libby_book in availability.get().iter() {
-            if libby_book.is_available {
-                info!("{:?}", libby_book);
-            }
-        }
-
-        // print holdable books
-        info!("\n\nHoldable books: {}", holdable_count);
-        for libby_book in availability.get().iter() {
-            if libby_book.is_holdable {
-                info!("{:?}", libby_book);
-            }
-        }
-        // print summary
-        // TODO: display this summary in app
-        info!(
-            available=available_count,
-            holdable=holdable_count,
-            not_owned=not_owned_count,
-            total=availability.get().len(),
-            "Summary.",
-        );
     };
 
     view! {
         <h1>"Libbyreads"</h1>
-        <p>"This app fetches books from your Goodreads to-read shelf and checks their availability at your library via Libby." </p>
+        <p>"Fetch books from your Goodreads to-read shelf and check their availability at your libraries via Libby." </p>
         <input
             type="text"
-            placeholder="44369181"
-            on:input=move |e| set_user_id(event_target_value(&e))
+            placeholder="Goodreads user ID"
+            value=user_id.get()
+            on:input=move |e| {
+                set_user_id(event_target_value(&e));
+                fetch_books(());
+            }
             title="Goodreads user ID"
-        />  
+        />
         {
             move || {
             let goodreads_url = format!("https://goodreads.com/review/list/{}?shelf=to-read", user_id.get());
             if user_id.get().is_empty() {
                 view! {
                 <div>
-                <p>"Enter your Goodreads user ID to get started. " 
-                    <a href="https://help.goodreads.com/s/article/Where-can-I-find-my-user-ID" target="_blank">
-                    "Need help?"
-                    </a>
-                </p>
+                    <p>"Enter your Goodreads user ID to get started. "
+                        <a href="https://help.goodreads.com/s/article/Where-can-I-find-my-user-ID" target="_blank">
+                        "Need help?"
+                        </a>
+                    </p>
                 </div>
                 }
             } else {
                 view! {
                 <div>
-                <p>
-                    "Verify your Goodreads to-read shelf:"
-                    <br />
-                <a href={goodreads_url.clone()} target="_blank">{goodreads_url}</a>
-                </p>
+                    <p>
+                        "Verify your Goodreads to-read shelf: "
+                        <a href={goodreads_url.clone()} target="_blank">{goodreads_url}</a>
+                    </p>
+                    <hr />
                 </div>
                 }
             }
             }
         }
         <div>
-            <LibrarySelect libraries=libraries set_libraries=set_libraries/>
+            <LibrarySelect search_libraries=search_libraries set_search_libraries=set_search_libraries selected_libraries=selected_libraries set_selected_libraries=set_selected_libraries/>
         </div>
-        <button on:click=fetch_books>"Fetch Goodreads Books"</button>
         <button on:click=move |_| fetch_availability()>"Fetch Libby Availability"</button>
-        <br />
+        // display progress bar
+        <div>
+            <p>{move || format!("Available: {}, Holdable: {}, Not Owned: {} -- {}/{}", available_count.get(), holdable_count.get(), not_owned_count.get(), libby_progress.get(), books.get().len())}</p>
+            <progress style="width: 95%;" value=libby_progress max={move || books.get().len()}></progress>
+        </div>
+        // display summary of availability
+        <hr />
         // display books in a table
         <table>
             <thead>
             <tr>
             <th on:click=move |_| {
-                set_sort_by("cover".to_string());
-                set_sort_order(if sort_by.get() == "cover" && sort_order.get() == "asc" { "desc".to_string() } else { "asc".to_string() });
+            set_sort_by("cover".to_string());
+            set_sort_order(if sort_by.get() == "cover" && sort_order.get() == "asc" { "desc".to_string() } else { "asc".to_string() });
             }>"Cover"</th>
             <th on:click=move |_| {
-                set_sort_by("title".to_string());
-                set_sort_order(if sort_by.get() == "title" && sort_order.get() == "asc" { "desc".to_string() } else { "asc".to_string() });
+            set_sort_by("title".to_string());
+            set_sort_order(if sort_by.get() == "title" && sort_order.get() == "asc" { "desc".to_string() } else { "asc".to_string() });
             }>"Title"</th>
             <th on:click=move |_| {
-                set_sort_by("author".to_string());
-                set_sort_order(if sort_by.get() == "author" && sort_order.get() == "asc" { "desc".to_string() } else { "asc".to_string() });
+            set_sort_by("author".to_string());
+            set_sort_order(if sort_by.get() == "author" && sort_order.get() == "asc" { "desc".to_string() } else { "asc".to_string() });
             }>"Author"</th>
             <th on:click=move |_| {
-                set_sort_by("availability".to_string());
-                set_sort_order(if sort_by.get() == "availability" && sort_order.get() == "asc" { "desc".to_string() } else { "asc".to_string() });
+            set_sort_by("availability".to_string());
+            set_sort_order(if sort_by.get() == "availability" && sort_order.get() == "desc" { "asc".to_string() } else { "desc".to_string() });
             }>"Libby Availability"</th>
             </tr>
             </thead>
@@ -589,17 +676,17 @@ fn HomePage() -> impl IntoView {
                     let b_availability = availability_list.iter().find(|libby_book| libby_book.title == b.title && libby_book.author == b.author);
                     match (a_availability, b_availability) {
                     (Some(a_libby), Some(b_libby)) => {
-                        if a_libby.is_available && !b_libby.is_available {
-                        std::cmp::Ordering::Less
-                        } else if !a_libby.is_available && b_libby.is_available {
-                        std::cmp::Ordering::Greater
-                        } else if a_libby.is_holdable && !b_libby.is_holdable {
-                        std::cmp::Ordering::Less
-                        } else if !a_libby.is_holdable && b_libby.is_holdable {
-                        std::cmp::Ordering::Greater
-                        } else {
-                        std::cmp::Ordering::Equal
-                        }
+                    if a_libby.is_available && !b_libby.is_available {
+                    std::cmp::Ordering::Less
+                    } else if !a_libby.is_available && b_libby.is_available {
+                    std::cmp::Ordering::Greater
+                    } else if a_libby.is_holdable && !b_libby.is_holdable {
+                    std::cmp::Ordering::Less
+                    } else if !a_libby.is_holdable && b_libby.is_holdable {
+                    std::cmp::Ordering::Greater
+                    } else {
+                    std::cmp::Ordering::Equal
+                    }
                     }
                     (Some(_), None) => std::cmp::Ordering::Less,
                     (None, Some(_)) => std::cmp::Ordering::Greater,
@@ -615,34 +702,33 @@ fn HomePage() -> impl IntoView {
                 }
             });
             sorted_books.into_iter().map(|book| {
-                let libby_book = availability.get().into_iter().find(|libby_book| libby_book.title == book.title && libby_book.author == book.author);
-                view! {
-                <tr>
-                    <td><img src={book.cover.clone()} alt="cover" /></td>
-                    <td>{book.title.clone()}</td>
-                    <td>{book.author.clone()}</td>
-                    <td>
-                        {match libby_book {
-                        Some(libby_book) if libby_book.is_available => view! {
-                            <a href={libby_book.libby_search_url.clone()} target="_blank">"AVAILABLE"</a>
-                        }.into_view(),
-                        Some(libby_book) if libby_book.is_holdable => view! {
-                            <a href={libby_book.libby_search_url.clone()} target="_blank">"HOLDABLE"</a>
-                        }.into_view(),
-                        Some(_) => view! {
-                            "NOT OWNED"
-                        }.into_view(),
-                        None => view! {
-                            "..."
-                        }.into_view(),
-                        }}
-                    </td>
-                </tr>
-                }
+            let libby_book = availability.get().into_iter().find(|libby_book| libby_book.title == book.title && libby_book.author == book.author);
+            view! {
+            <tr>
+                <td><img src={book.cover.clone()} alt="cover" /></td>
+                <td>{book.title.clone()}</td>
+                <td>{book.author.clone()}</td>
+                <td>
+                {match libby_book {
+                Some(libby_book) if libby_book.is_available => view! {
+                    <a href={libby_book.libby_search_url.clone()} target="_blank">"AVAILABLE"</a>
+                }.into_view(),
+                Some(libby_book) if libby_book.is_holdable => view! {
+                    <a href={libby_book.libby_search_url.clone()} target="_blank">"HOLDABLE"</a>
+                }.into_view(),
+                Some(_) => view! {
+                    "NOT OWNED"
+                }.into_view(),
+                None => view! {
+                    "..."
+                }.into_view(),
+                }}
+                </td>
+            </tr>
+            }
             }).collect::<Vec<_>>()
             }}
             </tbody>
         </table>
     }
 }
-
