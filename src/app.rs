@@ -245,10 +245,12 @@ pub async fn get_libby_availability(
             library.overdrive_base_url, url_safe_query, format_str,
         );
         info!(
-            "Searching for book: {} by {} at {}",
-            book.title, book.author, library.search_library.system_name
+            title = book.title,
+            author = book.author,
+            library = library.search_library.system_name,
+            libby_search_url = libby_search_url,
+            "Searching for book.",
         );
-        info!(libby_search_url = libby_search_url, "Libby search URL.");
 
         // Fetch the json from overdrive, then check the items array until we find a title that matches the book title
 
@@ -453,7 +455,7 @@ fn LibrarySelect(
                 match get_libraries(trimmed_input.to_string()).await {
                     Ok(libs) => set_search_libraries.set(libs),
                     //TODO: what to do on error here?
-                    Err(e) => {},
+                    Err(e) => {}
                 }
             }
         });
@@ -529,7 +531,6 @@ fn HomePage() -> impl IntoView {
     let (not_owned_count, set_not_owned_count) = create_signal(0);
     let (availability, set_availability) = create_signal(Vec::new());
 
-    
     let fetch_books = move |_| {
         let user_id = user_id.get();
         spawn_local(async move {
