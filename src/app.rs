@@ -528,6 +528,7 @@ fn HomePage() -> impl IntoView {
     let (user_id, set_user_id) = create_signal(String::new());
     let (search_libraries, set_search_libraries) = create_signal(Vec::<SearchLibrary>::new());
     let (selected_libraries, set_selected_libraries) = create_signal(Vec::<SearchLibrary>::new());
+    let selected_library_names = create_rw_signal(Vec::<String>::new());
     let (libby_progress, set_libby_progress) = create_signal(0);
     let (available_count, set_available_count) = create_signal(0);
     let (holdable_count, set_holdable_count) = create_signal(0);
@@ -567,80 +568,84 @@ fn HomePage() -> impl IntoView {
         set_holdable_count.update(|holdable| *holdable = 0);
         set_not_owned_count.update(|not_owned| *not_owned = 0);
         set_availability.update(|availability| availability.clear());
-    
+
         let books = books.get().clone();
-    
+
         let fetch_concurrent = async move {
             let mut in_flight = FuturesUnordered::new();
             let mut book_iter = books.into_iter();
             let concurrency_limit = 5;
-    
+
             // Start initial batch of requests (up to concurrency limit)
             for _ in 0..concurrency_limit {
                 if let Some(book) = book_iter.next() {
                     let book_clone = book.clone();
-    
+
                     // Wrap the async block in a Box to erase its type
-                    let handle: Pin<Box<dyn Future<Output = ()> + 'static>> = Box::pin(async move {
-                        match get_libby_availability(book_clone, selected_libraries.get()).await {
-                            Ok(fetched_availability) => {
-                                let availability_clone = fetched_availability.clone();
-                                set_availability.update(|availability| {
-                                    availability.push(availability_clone);
-                                });
-                                if fetched_availability.is_available {
-                                    set_available_count.update(|available| *available += 1);
-                                } else if fetched_availability.is_holdable {
-                                    set_holdable_count.update(|holdable| *holdable += 1);
-                                } else {
-                                    set_not_owned_count.update(|not_owned| *not_owned += 1);
+                    let handle: Pin<Box<dyn Future<Output = ()> + 'static>> =
+                        Box::pin(async move {
+                            match get_libby_availability(book_clone, selected_libraries.get()).await
+                            {
+                                Ok(fetched_availability) => {
+                                    let availability_clone = fetched_availability.clone();
+                                    set_availability.update(|availability| {
+                                        availability.push(availability_clone);
+                                    });
+                                    if fetched_availability.is_available {
+                                        set_available_count.update(|available| *available += 1);
+                                    } else if fetched_availability.is_holdable {
+                                        set_holdable_count.update(|holdable| *holdable += 1);
+                                    } else {
+                                        set_not_owned_count.update(|not_owned| *not_owned += 1);
+                                    }
+                                }
+                                Err(_) => {
+                                    // Handle error
                                 }
                             }
-                            Err(_) => {
-                                // Handle error
-                            }
-                        }
-                        set_libby_progress.update(|progress| *progress += 1);
-                    });
-    
+                            set_libby_progress.update(|progress| *progress += 1);
+                        });
+
                     in_flight.push(handle);
                 }
             }
-    
+
             // Process the queue dynamically, keeping <concurrency_limit> requests in flight at all times
             while let Some(_) = in_flight.next().await {
                 // When a request finishes, start another if there are more books to process
                 if let Some(book) = book_iter.next() {
                     let book_clone = book.clone();
-    
+
                     // Wrap the async block in a Box to erase its type
-                    let handle: Pin<Box<dyn Future<Output = ()> + 'static>> = Box::pin(async move {
-                        match get_libby_availability(book_clone, selected_libraries.get()).await {
-                            Ok(fetched_availability) => {
-                                let availability_clone = fetched_availability.clone();
-                                set_availability.update(|availability| {
-                                    availability.push(availability_clone);
-                                });
-                                if fetched_availability.is_available {
-                                    set_available_count.update(|available| *available += 1);
-                                } else if fetched_availability.is_holdable {
-                                    set_holdable_count.update(|holdable| *holdable += 1);
-                                } else {
-                                    set_not_owned_count.update(|not_owned| *not_owned += 1);
+                    let handle: Pin<Box<dyn Future<Output = ()> + 'static>> =
+                        Box::pin(async move {
+                            match get_libby_availability(book_clone, selected_libraries.get()).await
+                            {
+                                Ok(fetched_availability) => {
+                                    let availability_clone = fetched_availability.clone();
+                                    set_availability.update(|availability| {
+                                        availability.push(availability_clone);
+                                    });
+                                    if fetched_availability.is_available {
+                                        set_available_count.update(|available| *available += 1);
+                                    } else if fetched_availability.is_holdable {
+                                        set_holdable_count.update(|holdable| *holdable += 1);
+                                    } else {
+                                        set_not_owned_count.update(|not_owned| *not_owned += 1);
+                                    }
+                                }
+                                Err(_) => {
+                                    // Handle error
                                 }
                             }
-                            Err(_) => {
-                                // Handle error
-                            }
-                        }
-                        set_libby_progress.update(|progress| *progress += 1);
-                    });
-    
+                            set_libby_progress.update(|progress| *progress += 1);
+                        });
+
                     in_flight.push(handle);
                 }
             }
         };
-    
+
         // Trigger the async function that controls concurrency
         spawn_local(fetch_concurrent);
     };
@@ -687,13 +692,12 @@ fn HomePage() -> impl IntoView {
         <div>
             <LibrarySelect search_libraries=search_libraries set_search_libraries=set_search_libraries selected_libraries=selected_libraries set_selected_libraries=set_selected_libraries/>
         </div>
-        <button on:click=move |_| fetch_availability()>"Fetch Libby Availability"</button>
-        // display progress bar
+        <button on:click=move |_| fetch_availability()>"Search"</button>
+        // display summary of availability and progress bar
         <div>
             <p>{move || format!("Available: {}, Holdable: {}, Not Owned: {} -- {}/{}", available_count.get(), holdable_count.get(), not_owned_count.get(), libby_progress.get(), books.get().len())}</p>
             <progress style="width: 95%;" value=libby_progress max={move || books.get().len()}></progress>
         </div>
-        // display summary of availability
         <hr />
         // display books in a table
         <table>
