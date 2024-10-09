@@ -61,23 +61,25 @@ pub struct LibbyBook {
 }
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct SearchLibrary {
-    system_name: String,
-    website_id: String,
-    fulfillment_id: String,
-    name: String,
-    street: String,
-    city: String,
-    region: String,
-    zip: String,
+    system_name: String,    // Hawaii State Public Library System
+    website_id: String,     // 50
+    fulfillment_id: String, // hawaii
+    name: String,           // Hawaii Kai Library
     branch_count: i32,
 }
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct Library {
     search_library: SearchLibrary,
 
-    system_id: String,
-    libby_base_url: String,
-    overdrive_base_url: String,
+    system_id: String,          // hawaii
+    libby_base_url: String,     // https://libbyapp.com/library/hawaii
+    overdrive_base_url: String, // https://thunder.api.overdrive.com/v2/libraries/hawaii
+}
+
+#[derive(Params, PartialEq)]
+struct PageParams {
+    user_id: String,
+    libraries: String,
 }
 
 #[server(GetGoodreadsBooks, "/goodreads-books")]
@@ -194,41 +196,22 @@ pub async fn get_goodreads_books(user_id: String) -> Result<Vec<GoodreadsBook>, 
 
     let books: std::sync::MutexGuard<'_, Vec<GoodreadsBook>> = books.lock().unwrap();
     let duration = start.elapsed();
-    info!(initial_page_load_time=?initial_page_duration, all_pages_load_time=?duration, total_pages=last_page, total_books=books.len(), "Finished fetching all Goodreads pages.");
+    info!(
+        initial_page_load_time=?initial_page_duration,
+        all_pages_load_time=?duration,
+        total_pages=last_page,
+        total_books=books.len(),
+        "Finished fetching all Goodreads pages."
+    );
     Ok(books.clone())
 }
 
 #[server(GetLibbyAvailability, "/libby-availability")]
 pub async fn get_libby_availability(
     book: GoodreadsBook,
-    search_libs: Vec<SearchLibrary>,
+    libraries: Vec<Library>,
 ) -> Result<LibbyBook, ServerFnError> {
     // TODO: search all configured libraries concurrently for each book
-    // libs is a vector of SearchLibrary structs, but we need to convert them to Library structs
-    // to do that, we need to fetch the system_id for each library
-    let mut libraries = Vec::new();
-    for search_lib in search_libs {
-        let system_id_url = format!(
-            "https://thunder.api.overdrive.com/v2/libraries/?websiteid={}",
-            search_lib.website_id
-        );
-        let client = Client::new();
-        let library_json = client.get(&system_id_url).send().await?.text().await?;
-        let library_value: Value = serde_json::from_str(&library_json)?;
-        let system_id = library_value["items"][0]["id"].as_str().unwrap();
-        let libby_base_url = format!("https://libbyapp.com/library/{}", system_id);
-        let overdrive_base_url = format!(
-            "https://thunder.api.overdrive.com/v2/libraries/{}",
-            system_id
-        );
-        libraries.push(Library {
-            search_library: search_lib,
-            system_id: system_id.to_string(),
-            libby_base_url: libby_base_url,
-            overdrive_base_url: overdrive_base_url,
-        });
-    }
-
     let client = Client::new();
     let mut libby_library_books = Vec::new();
     let query = format!("{} {}", book.title, book.author);
@@ -372,25 +355,13 @@ pub async fn get_libraries(input: String) -> Result<Vec<SearchLibrary>, ServerFn
                 .as_i64()
                 .unwrap()
                 .to_string();
-            info!(
-                system_name = system_name,
-                fulfillment_id = fulfillment_id,
-                "Found library system."
-            );
+
             let name = branch["name"].as_str().unwrap();
-            let street = branch["address"].as_str().unwrap();
-            let city = branch["city"].as_str().unwrap();
-            let region = branch["region"].as_str().unwrap();
-            let zip = branch["postalCode"].as_str().unwrap();
             libraries.push(SearchLibrary {
                 system_name: system_name.to_string(),
                 website_id: website_id.to_string(),
                 fulfillment_id: fulfillment_id.to_string(),
                 name: name.to_string(),
-                street: street.to_string(),
-                city: city.to_string(),
-                region: region.to_string(),
-                zip: zip.to_string(),
                 branch_count: 1,
             });
         }
@@ -402,7 +373,85 @@ pub async fn get_libraries(input: String) -> Result<Vec<SearchLibrary>, ServerFn
         .collect::<Vec<_>>()
         .join(", ");
     info!(num_systems=libraries.len(), found_system_names=?found_system_names, "Found library systems.");
+    info!(
+        count = libraries.len(),
+        "Found libraries via libby autocomplete."
+    );
     Ok(libraries)
+}
+
+#[server(GetLibraryFromWebsiteId, "/library-from-website-id")]
+pub async fn get_library_from_website_id(website_id: String) -> Result<Library, ServerFnError> {
+    let system_id_url = format!(
+        "https://thunder.api.overdrive.com/v2/libraries/?websiteid={}",
+        website_id
+    );
+    let client = Client::new();
+    let library_json = client.get(&system_id_url).send().await?.text().await?;
+    let library_value: Value = serde_json::from_str(&library_json)?;
+    let system_id = library_value["items"][0]["id"].as_str().unwrap();
+    let fulfillment_id = library_value["items"][0]["fulfillmentId"].as_str().unwrap();
+    let name = library_value["items"][0]["name"].as_str().unwrap();
+    let libby_base_url = format!("https://libbyapp.com/library/{}", system_id);
+    let overdrive_base_url = format!(
+        "https://thunder.api.overdrive.com/v2/libraries/{}",
+        system_id
+    );
+    info!(
+        website_id = website_id,
+        method = "get_library_from_website_id",
+        "Found library system!!"
+    );
+    let search_lib = SearchLibrary {
+        system_name: name.to_string(),
+        website_id: website_id.to_string(),
+        fulfillment_id: fulfillment_id.to_string(),
+        name: name.to_string(),
+        branch_count: 1,
+    };
+    Ok(Library {
+        search_library: search_lib,
+        system_id: system_id.to_string(),
+        libby_base_url: libby_base_url,
+        overdrive_base_url: overdrive_base_url,
+    })
+}
+
+#[server(GetLibraryFromSystemId, "/library-from-system-id")]
+pub async fn get_library_from_system_id(system_id: String) -> Result<Library, ServerFnError> {
+    let system_id_url = format!(
+        "https://thunder.api.overdrive.com/v2/libraries/{}",
+        system_id
+    );
+    let client = Client::new();
+    let library_json = client.get(&system_id_url).send().await?.text().await?;
+    let library_value: Value = serde_json::from_str(&library_json)?;
+    let name = library_value["name"].as_str().unwrap();
+    let website_id = library_value["websiteId"].as_str().unwrap();
+    let fulfillment_id = library_value["fulfillmentId"].as_str().unwrap();
+    let libby_base_url = format!("https://libbyapp.com/library/{}", system_id);
+    let overdrive_base_url = format!(
+        "https://thunder.api.overdrive.com/v2/libraries/{}",
+        system_id
+    );
+    let search_lib = SearchLibrary {
+        system_name: name.to_string(),
+        website_id: website_id.to_string(),
+        fulfillment_id: fulfillment_id.to_string(),
+        name: name.to_string(),
+        branch_count: 1,
+    };
+    info!(
+        search_lib = ?search_lib,
+        method = "get_library_from_system_id",
+        "Found library system."
+    );
+    Ok(Library {
+        search_library: search_lib,
+        system_id: system_id.to_string(),
+        libby_base_url: libby_base_url,
+        overdrive_base_url: overdrive_base_url,
+    })
 }
 
 #[component]
@@ -443,11 +492,10 @@ pub fn App() -> impl IntoView {
 }
 
 #[component]
-fn LibrarySelect(
+fn LibrarySearch(
     search_libraries: ReadSignal<Vec<SearchLibrary>>,
     set_search_libraries: WriteSignal<Vec<SearchLibrary>>,
-    selected_libraries: ReadSignal<Vec<SearchLibrary>>,
-    set_selected_libraries: WriteSignal<Vec<SearchLibrary>>,
+    selected_library_website_ids: RwSignal<Vec<String>>,
 ) -> impl IntoView {
     let (search_input, set_search_input) = create_signal(String::new());
 
@@ -456,7 +504,9 @@ fn LibrarySelect(
             let trimmed_input = input.trim();
             if !trimmed_input.is_empty() {
                 match get_libraries(trimmed_input.to_string()).await {
-                    Ok(libs) => set_search_libraries.set(libs),
+                    Ok(libs) => {
+                        set_search_libraries.set(libs);
+                    }
                     //TODO: what to do on error here?
                     Err(e) => {}
                 }
@@ -464,11 +514,26 @@ fn LibrarySelect(
         });
     };
 
+    let add_selected_library = move |library: SearchLibrary| {
+        let mut curr_website_ids = selected_library_website_ids.get();
+        if !curr_website_ids.contains(&library.website_id) {
+            curr_website_ids.push(library.website_id.clone());
+            selected_library_website_ids.set(curr_website_ids);
+        }
+    };
+
+    let remove_selected_library = move |library: SearchLibrary| {
+        let mut curr_website_ids = selected_library_website_ids.get();
+        curr_website_ids.retain(|id| id != &library.website_id);
+        selected_library_website_ids.set(curr_website_ids);
+    };
+
     create_effect(move |_| {
         fetch_libraries(search_input.get());
     });
 
     view! {
+        <h2> "Add Libraries" </h2>
         <input
             type="text"
             placeholder="Type a library name, your city, or zip code."
@@ -485,7 +550,7 @@ fn LibrarySelect(
             <tbody>
             {move || search_libraries.get().iter().map(|library| {
                 let library_clone = library.clone();
-                let is_selected = selected_libraries.get().contains(&library_clone);
+                let is_selected = selected_library_website_ids().contains(&library_clone.website_id);
                 view! {
                 <tr>
                     <td>{library.system_name.clone()}</td>
@@ -493,24 +558,55 @@ fn LibrarySelect(
                     {if is_selected {
                         view! {
                         <button on:click=move |_| {
-                            set_selected_libraries.update(|selected| {
-                            if let Some(pos) = selected.iter().position(|x| *x == library_clone) {
-                                selected.remove(pos);
-                            }
-                            });
+                            remove_selected_library(library_clone.clone());
                         }>"Remove"</button>
                         }
                     } else {
                         view! {
                         <button on:click=move |_| {
-                            set_selected_libraries.update(|selected| {
-                            if !selected.contains(&library_clone) {
-                                selected.push(library_clone.clone());
-                            }
-                            });
+                            add_selected_library(library_clone.clone());
                         }>"Add"</button>
                         }
                     }}
+                    </td>
+                </tr>
+                }
+            }).collect::<Vec<_>>()}
+            </tbody>
+        </table>
+    }
+}
+
+#[component]
+fn DisplaySelectedLibraries(
+    selected_libraries: RwSignal<Vec<Library>>,
+    selected_library_website_ids: RwSignal<Vec<String>>,
+) -> impl IntoView {
+    let remove_selected_library = move |library: SearchLibrary| {
+        let mut curr_website_ids = selected_library_website_ids.get();
+        curr_website_ids.retain(|id| id != &library.website_id);
+        selected_library_website_ids.set(curr_website_ids);
+    };
+
+    view! {
+        <h2>"Selected Libraries"</h2>
+        <table>
+            <thead>
+            <tr>
+                <th style="width: 80%">"Library"</th>
+                <th style="width: 20%">"Action"</th>
+            </tr>
+            </thead>
+            <tbody>
+            {move || selected_libraries.get().iter().map(|library| {
+                let library_clone = library.clone();
+                view! {
+                <tr>
+                    <td>{library.search_library.system_name.clone()}</td>
+                    <td>
+                        <button on:click=move |_| {remove_selected_library(library_clone.search_library.clone());}>
+                            "Remove"
+                        </button>
                     </td>
                 </tr>
                 }
@@ -527,15 +623,68 @@ fn HomePage() -> impl IntoView {
     let (sort_order, set_sort_order) = create_signal(String::from("asc"));
     let (user_id, set_user_id) = create_signal(String::new());
     let (search_libraries, set_search_libraries) = create_signal(Vec::<SearchLibrary>::new());
-    let (selected_libraries, set_selected_libraries) = create_signal(Vec::<SearchLibrary>::new());
-    let selected_library_names = create_rw_signal(Vec::<String>::new());
+
+    let selected_library_website_ids = create_rw_signal(Vec::<String>::new());
+    let selected_libraries = create_rw_signal(Vec::<Library>::new());
+    // selected_libraries is derived from selected_library_website_ids
+    create_effect(move |_| {
+        let selected_library_website_ids_clone = selected_library_website_ids.get().clone();
+
+        // Remove the libraries that are no longer in `selected_library_website_ids`
+        selected_libraries.update(|libs| {
+            libs.retain(|lib| {
+                selected_library_website_ids_clone
+                    .iter()
+                    .any(|website_id| &lib.search_library.website_id == website_id)
+            });
+        });
+
+        // Filter out libraries that are already in the selected_libraries signal
+        let new_libs_to_fetch = selected_library_website_ids_clone
+            .iter()
+            .filter(|website_id| {
+                !selected_libraries
+                    .get()
+                    .iter()
+                    .any(|lib| &lib.search_library.website_id == *website_id)
+            })
+            .cloned()
+            .collect::<Vec<String>>();
+
+        if new_libs_to_fetch.is_empty() {
+            return; // No new libraries to fetch, exit early
+        }
+
+        let futures: Vec<_> = new_libs_to_fetch
+            .into_iter()
+            .map(|website_id| get_library_from_website_id(website_id))
+            .collect();
+
+        // Fetch libraries asynchronously and update the signal as they arrive
+        spawn_local(async move {
+            let mut libraries = Vec::new();
+            for future in futures {
+                if let Ok(lib) = future.await {
+                    libraries.push(lib.clone());
+                    // Now check before pushing to avoid duplicates
+                    selected_libraries.update(|libs| {
+                        if !libs.iter().any(|existing_lib| {
+                            existing_lib.search_library.website_id == lib.search_library.website_id
+                        }) {
+                            libs.push(lib);
+                        }
+                    });
+                }
+            }
+        });
+    });
     let (libby_progress, set_libby_progress) = create_signal(0);
     let (available_count, set_available_count) = create_signal(0);
     let (holdable_count, set_holdable_count) = create_signal(0);
     let (not_owned_count, set_not_owned_count) = create_signal(0);
     let (availability, set_availability) = create_signal(Vec::new());
 
-    let fetch_books = move |_| {
+    let fetch_books = move || {
         let user_id = user_id.get();
         spawn_local(async move {
             match get_goodreads_books(user_id).await {
@@ -548,19 +697,55 @@ fn HomePage() -> impl IntoView {
     };
 
     //TODO also update the user_id in the URL when a user enters it in the input field
-    let query_params = use_query_map();
+    let query = use_query::<PageParams>();
     //TODO: can't log this in the frontend because tracing::info is SSR only
     // info!(query_params = ?query_params, "Params.");
     let user_id_from_url = move || {
-        query_params.with(|query_params| query_params.get("user_id").cloned().unwrap_or_default())
+        query.with(|query| {
+            query
+                .as_ref()
+                .map(|query| query.user_id.clone())
+                .unwrap_or_default()
+        })
     };
     //TODO: can't log this in the frontend because tracing::info is SSR only
     // info!(user_id = user_id_from_url(), "User ID from URL.");
     let user_id_from_url_value = user_id_from_url();
     if !user_id_from_url_value.is_empty() {
         set_user_id(user_id_from_url_value);
-        fetch_books(());
+        fetch_books();
     }
+
+    // get a list of website ids from the url query param, if it exists
+    let selected_library_website_ids_from_url = move || {
+        query.with(|params: &Result<PageParams, ParamsError>| {
+            if let Ok(params) = params.as_ref() {
+                // libraries is a string like "50,34550,315"
+                // we split it into a Vec of strings
+                if !params.libraries.is_empty() {
+                    params
+                        .libraries
+                        .split(",")
+                        .map(|lib| lib.to_string())
+                        .collect::<Vec<String>>()
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            }
+        })
+    };
+
+    let selected_library_website_ids_from_url_value = selected_library_website_ids_from_url();
+    if !selected_library_website_ids_from_url_value.is_empty() {
+        selected_library_website_ids.set(selected_library_website_ids_from_url_value.clone());
+    }
+    logging::log!("User ID {:?}", user_id.get());
+    logging::log!(
+        "Selected libraries website IDs: {:?}",
+        selected_library_website_ids.get()
+    );
 
     let fetch_availability = move || {
         set_libby_progress.update(|progress| *progress = 0);
@@ -584,8 +769,7 @@ fn HomePage() -> impl IntoView {
                     // Wrap the async block in a Box to erase its type
                     let handle: Pin<Box<dyn Future<Output = ()> + 'static>> =
                         Box::pin(async move {
-                            match get_libby_availability(book_clone, selected_libraries.get()).await
-                            {
+                            match get_libby_availability(book_clone, selected_libraries()).await {
                                 Ok(fetched_availability) => {
                                     let availability_clone = fetched_availability.clone();
                                     set_availability.update(|availability| {
@@ -619,8 +803,7 @@ fn HomePage() -> impl IntoView {
                     // Wrap the async block in a Box to erase its type
                     let handle: Pin<Box<dyn Future<Output = ()> + 'static>> =
                         Box::pin(async move {
-                            match get_libby_availability(book_clone, selected_libraries.get()).await
-                            {
+                            match get_libby_availability(book_clone, selected_libraries()).await {
                                 Ok(fetched_availability) => {
                                     let availability_clone = fetched_availability.clone();
                                     set_availability.update(|availability| {
@@ -659,7 +842,7 @@ fn HomePage() -> impl IntoView {
             value=user_id.get()
             on:input=move |e| {
                 set_user_id(event_target_value(&e));
-                fetch_books(());
+                fetch_books();
             }
             title="Goodreads user ID"
         />
@@ -690,7 +873,10 @@ fn HomePage() -> impl IntoView {
             }
         }
         <div>
-            <LibrarySelect search_libraries=search_libraries set_search_libraries=set_search_libraries selected_libraries=selected_libraries set_selected_libraries=set_selected_libraries/>
+            <LibrarySearch search_libraries=search_libraries set_search_libraries=set_search_libraries selected_library_website_ids=selected_library_website_ids />
+        </div>
+        <div>
+            <DisplaySelectedLibraries selected_libraries=selected_libraries selected_library_website_ids=selected_library_website_ids/>
         </div>
         <button on:click=move |_| fetch_availability()>"Search"</button>
         // display summary of availability and progress bar
