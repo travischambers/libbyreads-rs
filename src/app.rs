@@ -696,10 +696,7 @@ fn HomePage() -> impl IntoView {
         });
     };
 
-    //TODO also update the user_id in the URL when a user enters it in the input field
     let query = use_query::<PageParams>();
-    //TODO: can't log this in the frontend because tracing::info is SSR only
-    // info!(query_params = ?query_params, "Params.");
     let user_id_from_url = move || {
         query.with(|query| {
             query
@@ -708,8 +705,6 @@ fn HomePage() -> impl IntoView {
                 .unwrap_or_default()
         })
     };
-    //TODO: can't log this in the frontend because tracing::info is SSR only
-    // info!(user_id = user_id_from_url(), "User ID from URL.");
     let user_id_from_url_value = user_id_from_url();
     if !user_id_from_url_value.is_empty() {
         set_user_id(user_id_from_url_value);
