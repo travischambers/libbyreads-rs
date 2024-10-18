@@ -1006,9 +1006,12 @@ fn HomePage() -> impl IntoView {
                 if is_private_profile.get() {
                     view! {
                     <div>
-                        <p>Your Goodreads profile is private. Libbyreads requires it to be public. You can learn how to edit your privacy settings by following
-                            <a href="https://help.goodreads.com/s/article/How-do-I-edit-my-privacy-settings-1553870936907" target="_blank">
-                                this guide on Goodreads
+                        <p style="color: #d9534f; font-weight: bold;">
+                            "⚠ Your Goodreads profile is private. Libbyreads requires it to be public. "
+                            "Edit your privacy settings via "
+                            <a href="https://help.goodreads.com/s/article/How-do-I-edit-my-privacy-settings-1553870936907"
+                            target="_blank" rel="noopener noreferrer" style="text-decoration: underline; color: #0275d8;">
+                                "this guide on Goodreads"
                             </a>.
                         </p>
                     </div>
