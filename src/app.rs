@@ -483,7 +483,7 @@ pub fn App() -> impl IntoView {
         <Stylesheet id="leptos" href="/pkg/libbyreads-rs.css"/>
 
         // sets the document title
-        <Title text="Libbyreads"/>
+        <Title text="LibbyReads"/>
 
         // content for this welcome page
         <Router fallback=|| {
@@ -949,7 +949,7 @@ fn HomePage() -> impl IntoView {
     };
 
     view! {
-            <h1>"Libbyreads"</h1>
+            <h1>"LibbyReads"</h1>
             <p>"Fetch books from your Goodreads to-read shelf and check their availability at your libraries via Libby." </p>
             <input
                 type="text"
@@ -1007,7 +1007,7 @@ fn HomePage() -> impl IntoView {
                     view! {
                     <div>
                         <p style="color: #d9534f; font-weight: bold;">
-                            "⚠ Your Goodreads profile is private. Libbyreads requires it to be public. "
+                            "⚠ Your Goodreads profile is private. LibbyReads requires it to be public. "
                             "Edit your privacy settings via "
                             <a href="https://help.goodreads.com/s/article/How-do-I-edit-my-privacy-settings-1553870936907"
                             target="_blank" rel="noopener noreferrer" style="text-decoration: underline; color: #0275d8;">
