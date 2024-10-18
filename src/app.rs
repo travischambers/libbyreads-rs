@@ -102,29 +102,40 @@ pub async fn get_goodreads_books(user_id: String) -> Result<Vec<GoodreadsBook>, 
     // Parse the HTML document
     // the Html struct is not Sync, so we can't share it between threads
     // instead, we parse the document in a blocking tokio task
-    let client = Client::new();
-    let response = client.get(&url).send().await?.text().await?;
-    let last_page = tokio::task::spawn_blocking(move || {
-        let html = Html::parse_document(&response);
+    let last_page = {
+        let client = Client::new();
+        let response = client.get(&url).send().await?.text().await?;
+        let original_html = Html::parse_document(&response);
         info!("Parsed html successfully.");
+        // check for the `id=privateProfile` div, which indicates we won't be able to see any books
+        let private_profile_selector = Selector::parse("#privateProfile").unwrap();
+        if original_html
+            .select(&private_profile_selector)
+            .next()
+            .is_some()
+        {
+            return Err(ServerFnError::ServerError("Private profile".to_string()));
+        }
         // get the total number of pages
         let pagination_selector = Selector::parse("#reviewPagination a").unwrap();
 
         // Find the highest number in the pagination links
-        let last_page = html
+        let last_page = original_html
             .select(&pagination_selector)
             .filter_map(|element| element.text().collect::<String>().parse::<u32>().ok())
             .max()
             .unwrap_or(1); // If there are no pagination links, there is only one page
-        info!(
-            total_pages = last_page,
-            "Parsed number of pages from initial page."
-        );
+
+        // in rust, the last expression without a semicolon is implicitly returned
         last_page
-    })
-    .await?;
+    };
 
     let initial_page_duration = start.elapsed();
+    info!(
+        total_pages = last_page,
+        duration_s = initial_page_duration.as_secs_f32(),
+        "Parsed number of pages from initial page."
+    );
     // Create async tasks for each page
     let mut tasks = vec![];
     for page_number in 1..=last_page {
@@ -138,7 +149,8 @@ pub async fn get_goodreads_books(user_id: String) -> Result<Vec<GoodreadsBook>, 
             if let Ok(response) = client.get(&page_url).send().await {
                 if let Ok(text) = response.text().await {
                     let document = Html::parse_document(&text);
-                    // Define selectors - i just looked at the HTML directly to determine these
+
+                    // i just looked at the HTML directly to determine these selectors
                     let book_rows_selector = Selector::parse("tr.bookalike.review").unwrap();
                     let cover_selector = Selector::parse("td.field.cover img").unwrap();
                     let title_selector = Selector::parse("td.field.title a").unwrap();
@@ -617,8 +629,111 @@ fn DisplaySelectedLibraries(
 }
 
 #[component]
+fn BookTable(
+    books: ReadSignal<Vec<GoodreadsBook>>,
+    availability: ReadSignal<Vec<LibbyBook>>,
+    sort_by: ReadSignal<String>,
+    sort_order: ReadSignal<String>,
+    set_sort_by: WriteSignal<String>,
+    set_sort_order: WriteSignal<String>,
+) -> impl IntoView {
+    view! {
+        <table>
+        <thead>
+        <tr>
+        <th on:click=move |_| {
+        set_sort_by("cover".to_string());
+        set_sort_order(if sort_by.get() == "cover" && sort_order.get() == "asc" { "desc".to_string() } else { "asc".to_string() });
+        }>"Cover"</th>
+        <th on:click=move |_| {
+        set_sort_by("title".to_string());
+        set_sort_order(if sort_by.get() == "title" && sort_order.get() == "asc" { "desc".to_string() } else { "asc".to_string() });
+        }>"Title"</th>
+        <th on:click=move |_| {
+        set_sort_by("author".to_string());
+        set_sort_order(if sort_by.get() == "author" && sort_order.get() == "asc" { "desc".to_string() } else { "asc".to_string() });
+        }>"Author"</th>
+        <th on:click=move |_| {
+        set_sort_by("availability".to_string());
+        set_sort_order(if sort_by.get() == "availability" && sort_order.get() == "desc" { "asc".to_string() } else { "desc".to_string() });
+        }>"Libby Availability"</th>
+        </tr>
+        </thead>
+        <tbody>
+        {move || {
+        let mut sorted_books = books.get().clone();
+        sorted_books.sort_by(|a, b| {
+            let order = match sort_by.get().as_str() {
+            "cover" => a.cover.cmp(&b.cover),
+            "title" => a.title.cmp(&b.title),
+            "author" => a.author.cmp(&b.author),
+            "availability" => {
+                let availability_list = availability.get();
+                let a_availability = availability_list.iter().find(|libby_book| libby_book.title == a.title && libby_book.author == a.author);
+                let b_availability = availability_list.iter().find(|libby_book| libby_book.title == b.title && libby_book.author == b.author);
+                match (a_availability, b_availability) {
+                (Some(a_libby), Some(b_libby)) => {
+                if a_libby.is_available && !b_libby.is_available {
+                std::cmp::Ordering::Less
+                } else if !a_libby.is_available && b_libby.is_available {
+                std::cmp::Ordering::Greater
+                } else if a_libby.is_holdable && !b_libby.is_holdable {
+                std::cmp::Ordering::Less
+                } else if !a_libby.is_holdable && b_libby.is_holdable {
+                std::cmp::Ordering::Greater
+                } else {
+                std::cmp::Ordering::Equal
+                }
+                }
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+                }
+            }
+            _ => std::cmp::Ordering::Equal,
+            };
+            if sort_order.get() == "asc" {
+            order
+            } else {
+            order.reverse()
+            }
+        });
+        sorted_books.into_iter().map(|book| {
+        let libby_book = availability.get().into_iter().find(|libby_book| libby_book.title == book.title && libby_book.author == book.author);
+        view! {
+        <tr>
+            <td><img src={book.cover.clone()} alt="cover" /></td>
+            <td>{book.title.clone()}</td>
+            <td>{book.author.clone()}</td>
+            <td>
+            {match libby_book {
+            Some(libby_book) if libby_book.is_available => view! {
+                <a href={libby_book.libby_search_url.clone()} target="_blank">"AVAILABLE"</a>
+            }.into_view(),
+            Some(libby_book) if libby_book.is_holdable => view! {
+                <a href={libby_book.libby_search_url.clone()} target="_blank">"HOLDABLE"</a>
+            }.into_view(),
+            Some(_) => view! {
+                "NOT OWNED"
+            }.into_view(),
+            None => view! {
+                "..."
+            }.into_view(),
+            }}
+            </td>
+        </tr>
+        }
+        }).collect::<Vec<_>>()
+        }}
+        </tbody>
+    </table>
+    }
+}
+
+#[component]
 fn HomePage() -> impl IntoView {
     let (books, set_books) = create_signal(Vec::new());
+    let is_private_profile = create_rw_signal(false);
     let (sort_by, set_sort_by) = create_signal(String::from("availability"));
     let (sort_order, set_sort_order) = create_signal(String::from("asc"));
     let (user_id, set_user_id) = create_signal(String::new());
@@ -690,7 +805,12 @@ fn HomePage() -> impl IntoView {
             match get_goodreads_books(user_id).await {
                 Ok(fetched_books) => set_books.set(fetched_books),
                 Err(e) => {
-                    //TODO: what to do on error here?
+                    is_private_profile.update(|is_private| {
+                        // TODO: this is a hacky way to check if the profile is private
+                        // instead, figure out how to return a custom error from the server fn
+                        // and check for that here
+                        *is_private = e.to_string().contains("Private profile");
+                    });
                 }
             }
         });
@@ -829,146 +949,78 @@ fn HomePage() -> impl IntoView {
     };
 
     view! {
-        <h1>"Libbyreads"</h1>
-        <p>"Fetch books from your Goodreads to-read shelf and check their availability at your libraries via Libby." </p>
-        <input
-            type="text"
-            placeholder="Goodreads user ID"
-            value=user_id.get()
-            on:input=move |e| {
-                set_user_id(event_target_value(&e));
-                fetch_books();
-            }
-            title="Goodreads user ID"
-        />
-        {
-            move || {
-            let goodreads_url = format!("https://goodreads.com/review/list/{}?shelf=to-read", user_id.get());
-            if user_id.get().is_empty() {
-                view! {
-                <div>
-                    <p>"Enter your Goodreads user ID to get started. "
-                        <a href="https://help.goodreads.com/s/article/Where-can-I-find-my-user-ID" target="_blank">
-                        "Need help?"
-                        </a>
-                    </p>
-                </div>
+            <h1>"Libbyreads"</h1>
+            <p>"Fetch books from your Goodreads to-read shelf and check their availability at your libraries via Libby." </p>
+            <input
+                type="text"
+                placeholder="Goodreads user ID"
+                value=user_id.get()
+                on:input=move |e| {
+                    set_user_id(event_target_value(&e));
+                    fetch_books();
                 }
-            } else {
-                view! {
-                <div>
-                    <p>
-                        "Verify your Goodreads to-read shelf: "
-                        <a href={goodreads_url.clone()} target="_blank">{goodreads_url}</a>
-                    </p>
-                    <hr />
-                </div>
+                title="Goodreads user ID"
+            />
+            {
+                move || {
+                let goodreads_url = format!("https://goodreads.com/review/list/{}?shelf=to-read", user_id.get());
+                if user_id.get().is_empty() {
+                    view! {
+                    <div>
+                        <p>"Enter your Goodreads user ID to get started. "
+                            <a href="https://help.goodreads.com/s/article/Where-can-I-find-my-user-ID" target="_blank">
+                            "Need help?"
+                            </a>
+                        </p>
+                    </div>
+                    }
+                } else {
+                    view! {
+                    <div>
+                        <p>
+                            "Verify your Goodreads to-read shelf: "
+                            <a href={goodreads_url.clone()} target="_blank">{goodreads_url}</a>
+                        </p>
+                        <hr />
+                    </div>
+                    }
+                }
                 }
             }
+            <div>
+                <LibrarySearch search_libraries=search_libraries set_search_libraries=set_search_libraries selected_library_website_ids=selected_library_website_ids />
+            </div>
+            <div>
+                <DisplaySelectedLibraries selected_libraries=selected_libraries selected_library_website_ids=selected_library_website_ids/>
+            </div>
+            <button on:click=move |_| fetch_availability()>"Search"</button>
+            // display summary of availability and progress bar
+            <div>
+                <p>{move || format!("Available: {}, Holdable: {}, Not Owned: {} -- {}/{}", available_count.get(), holdable_count.get(), not_owned_count.get(), libby_progress.get(), books.get().len())}</p>
+                <progress style="width: 95%;" value=libby_progress max={move || books.get().len()}></progress>
+            </div>
+            <hr />
+            // display books in a table if the user is not private
+            {
+                move || {
+                if is_private_profile.get() {
+                    view! {
+                    <div>
+                        <p>Your Goodreads profile is private. Libbyreads requires it to be public. You can learn how to edit your privacy settings by following
+                            <a href="https://help.goodreads.com/s/article/How-do-I-edit-my-privacy-settings-1553870936907" target="_blank">
+                                this guide on Goodreads
+                            </a>.
+                        </p>
+                    </div>
+                    }
+                } else {
+                    view! {
+                        <div>
+                            <BookTable books=books availability=availability sort_by=sort_by sort_order=sort_order set_sort_by=set_sort_by set_sort_order=set_sort_order />
+                        </div>
+                    }
+                }
             }
         }
-        <div>
-            <LibrarySearch search_libraries=search_libraries set_search_libraries=set_search_libraries selected_library_website_ids=selected_library_website_ids />
-        </div>
-        <div>
-            <DisplaySelectedLibraries selected_libraries=selected_libraries selected_library_website_ids=selected_library_website_ids/>
-        </div>
-        <button on:click=move |_| fetch_availability()>"Search"</button>
-        // display summary of availability and progress bar
-        <div>
-            <p>{move || format!("Available: {}, Holdable: {}, Not Owned: {} -- {}/{}", available_count.get(), holdable_count.get(), not_owned_count.get(), libby_progress.get(), books.get().len())}</p>
-            <progress style="width: 95%;" value=libby_progress max={move || books.get().len()}></progress>
-        </div>
-        <hr />
-        // display books in a table
-        <table>
-            <thead>
-            <tr>
-            <th on:click=move |_| {
-            set_sort_by("cover".to_string());
-            set_sort_order(if sort_by.get() == "cover" && sort_order.get() == "asc" { "desc".to_string() } else { "asc".to_string() });
-            }>"Cover"</th>
-            <th on:click=move |_| {
-            set_sort_by("title".to_string());
-            set_sort_order(if sort_by.get() == "title" && sort_order.get() == "asc" { "desc".to_string() } else { "asc".to_string() });
-            }>"Title"</th>
-            <th on:click=move |_| {
-            set_sort_by("author".to_string());
-            set_sort_order(if sort_by.get() == "author" && sort_order.get() == "asc" { "desc".to_string() } else { "asc".to_string() });
-            }>"Author"</th>
-            <th on:click=move |_| {
-            set_sort_by("availability".to_string());
-            set_sort_order(if sort_by.get() == "availability" && sort_order.get() == "desc" { "asc".to_string() } else { "desc".to_string() });
-            }>"Libby Availability"</th>
-            </tr>
-            </thead>
-            <tbody>
-            {move || {
-            let mut sorted_books = books.get().clone();
-            sorted_books.sort_by(|a, b| {
-                let order = match sort_by.get().as_str() {
-                "cover" => a.cover.cmp(&b.cover),
-                "title" => a.title.cmp(&b.title),
-                "author" => a.author.cmp(&b.author),
-                "availability" => {
-                    let availability_list = availability.get();
-                    let a_availability = availability_list.iter().find(|libby_book| libby_book.title == a.title && libby_book.author == a.author);
-                    let b_availability = availability_list.iter().find(|libby_book| libby_book.title == b.title && libby_book.author == b.author);
-                    match (a_availability, b_availability) {
-                    (Some(a_libby), Some(b_libby)) => {
-                    if a_libby.is_available && !b_libby.is_available {
-                    std::cmp::Ordering::Less
-                    } else if !a_libby.is_available && b_libby.is_available {
-                    std::cmp::Ordering::Greater
-                    } else if a_libby.is_holdable && !b_libby.is_holdable {
-                    std::cmp::Ordering::Less
-                    } else if !a_libby.is_holdable && b_libby.is_holdable {
-                    std::cmp::Ordering::Greater
-                    } else {
-                    std::cmp::Ordering::Equal
-                    }
-                    }
-                    (Some(_), None) => std::cmp::Ordering::Less,
-                    (None, Some(_)) => std::cmp::Ordering::Greater,
-                    (None, None) => std::cmp::Ordering::Equal,
-                    }
-                }
-                _ => std::cmp::Ordering::Equal,
-                };
-                if sort_order.get() == "asc" {
-                order
-                } else {
-                order.reverse()
-                }
-            });
-            sorted_books.into_iter().map(|book| {
-            let libby_book = availability.get().into_iter().find(|libby_book| libby_book.title == book.title && libby_book.author == book.author);
-            view! {
-            <tr>
-                <td><img src={book.cover.clone()} alt="cover" /></td>
-                <td>{book.title.clone()}</td>
-                <td>{book.author.clone()}</td>
-                <td>
-                {match libby_book {
-                Some(libby_book) if libby_book.is_available => view! {
-                    <a href={libby_book.libby_search_url.clone()} target="_blank">"AVAILABLE"</a>
-                }.into_view(),
-                Some(libby_book) if libby_book.is_holdable => view! {
-                    <a href={libby_book.libby_search_url.clone()} target="_blank">"HOLDABLE"</a>
-                }.into_view(),
-                Some(_) => view! {
-                    "NOT OWNED"
-                }.into_view(),
-                None => view! {
-                    "..."
-                }.into_view(),
-                }}
-                </td>
-            </tr>
-            }
-            }).collect::<Vec<_>>()
-            }}
-            </tbody>
-        </table>
     }
 }
