@@ -98,7 +98,7 @@ pub async fn get_goodreads_books(user_id: String) -> Result<Vec<GoodreadsBook>, 
         "https://goodreads.com/review/list/{}?print=true&shelf=to-read",
         user_id
     );
-    info!(url = url, "Fetching initial page.");
+    info!(user_id = user_id, url = url, "Fetching initial page.");
     // Parse the HTML document
     // the Html struct is not Sync, so we can't share it between threads
     // instead, we parse the document in a blocking tokio task
@@ -106,7 +106,7 @@ pub async fn get_goodreads_books(user_id: String) -> Result<Vec<GoodreadsBook>, 
         let client = Client::new();
         let response = client.get(&url).send().await?.text().await?;
         let original_html = Html::parse_document(&response);
-        info!("Parsed html successfully.");
+        info!(user_id = user_id, "Parsed html successfully.");
         // check for the `id=privateProfile` div, which indicates we won't be able to see any books
         let private_profile_selector = Selector::parse("#privateProfile").unwrap();
         if original_html
@@ -132,6 +132,7 @@ pub async fn get_goodreads_books(user_id: String) -> Result<Vec<GoodreadsBook>, 
 
     let initial_page_duration = start.elapsed();
     info!(
+        user_id = user_id,
         total_pages = last_page,
         duration_s = initial_page_duration.as_secs_f32(),
         "Parsed number of pages from initial page."
@@ -142,7 +143,7 @@ pub async fn get_goodreads_books(user_id: String) -> Result<Vec<GoodreadsBook>, 
         let books = Arc::clone(&books); // Clone the Arc for each task
         let client = Client::new();
         let page_url = format!("{}&page={}", url, page_number);
-        info!(url = page_url, "Fetching page at url.");
+        info!(user_id = user_id, url = page_url, "Fetching Goodreads books.");
 
         // Spawn a new async task to fetch and parse the page
         let task = tokio::task::spawn(async move {
@@ -209,6 +210,7 @@ pub async fn get_goodreads_books(user_id: String) -> Result<Vec<GoodreadsBook>, 
     let books: std::sync::MutexGuard<'_, Vec<GoodreadsBook>> = books.lock().unwrap();
     let duration = start.elapsed();
     info!(
+        user_id = user_id,
         initial_page_load_time=?initial_page_duration,
         all_pages_load_time=?duration,
         total_pages=last_page,
