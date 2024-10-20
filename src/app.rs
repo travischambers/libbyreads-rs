@@ -143,7 +143,11 @@ pub async fn get_goodreads_books(user_id: String) -> Result<Vec<GoodreadsBook>, 
         let books = Arc::clone(&books); // Clone the Arc for each task
         let client = Client::new();
         let page_url = format!("{}&page={}", url, page_number);
-        info!(user_id = user_id, url = page_url, "Fetching Goodreads books.");
+        info!(
+            user_id = user_id,
+            url = page_url,
+            "Fetching Goodreads books."
+        );
 
         // Spawn a new async task to fetch and parse the page
         let task = tokio::task::spawn(async move {
@@ -169,12 +173,19 @@ pub async fn get_goodreads_books(user_id: String) -> Result<Vec<GoodreadsBook>, 
                         // Remove the span with the class darkGreyText, which Goodreads sometimes adds
                         // e.g. A Darker Shade of Magic <span class="darkGreyText">(Shades of Magic, #1)</span>
                         // should become A Darker Shade of Magic (Shades of Magic, #1)
+                        // let title = title_element
+                        //     .text()
+                        //     .collect::<Vec<_>>()
+                        //     .join("")
+                        //     .trim()
+                        //     .to_string();
+
                         let title = title_element
-                            .text()
-                            .collect::<Vec<_>>()
-                            .join("")
-                            .trim()
-                            .to_string();
+                            .children() // Get the child nodes of the <a> tag
+                            .filter(|node| node.value().is_text()) // Filter to get only the text nodes (ignoring <span>)
+                            .map(|node| node.value().as_text().unwrap().trim()) // Extract and trim the text
+                            .collect::<Vec<_>>() // Collect the text parts
+                            .join(" "); // Join them into a single string
 
                         // Get author
                         let author_element = book_row.select(&author_selector).next().unwrap();
@@ -267,13 +278,14 @@ pub async fn get_libby_availability(
         let items = json["items"].as_array().unwrap();
         let mut book_found_at_library = false;
         for item in items {
-            let title: &str = item["title"].as_str().unwrap();
+            let title_replaced = item["title"].as_str().unwrap().replace("\n", "");
+            let title: &str = title_replaced.trim();
             let author: &str = item["firstCreatorSortName"].as_str().unwrap();
             let is_available: bool = item["isAvailable"].as_bool().unwrap();
             let is_holdable: bool = item["isHoldable"].as_bool().unwrap();
             let cover: &str = item["covers"]["cover150Wide"]["href"].as_str().unwrap();
 
-            if title.to_lowercase() == book.title.to_lowercase()
+            if book.title.to_lowercase().starts_with(&title.to_lowercase())
                 && author.to_lowercase() == book.author.to_lowercase()
             {
                 let libby_library_book = LibbyLibraryBook {
@@ -291,11 +303,11 @@ pub async fn get_libby_availability(
         }
         if !book_found_at_library {
             info!(
-                "Did not find book {} in libby at {}.",
-                book.title, library.search_library.system_name
+                goodreads_title = book.title,
+                goodreads_author = book.author,
+                library = library.search_library.system_name,
+                "Did not find book in libby.",
             );
-            info!("{}", libby_search_url);
-            info!("{}\n", overdrive_url);
             libby_library_books.push(LibbyLibraryBook {
                 cover: "".to_string(),
                 title: book.title.to_string(),
@@ -386,10 +398,10 @@ pub async fn get_libraries(input: String) -> Result<Vec<SearchLibrary>, ServerFn
         .map(|lib| lib.system_name.clone())
         .collect::<Vec<_>>()
         .join(", ");
-    info!(num_systems=libraries.len(), found_system_names=?found_system_names, "Found library systems.");
     info!(
-        count = libraries.len(),
-        "Found libraries via libby autocomplete."
+        num_systems=libraries.len(),
+        found_system_names=?found_system_names,
+        "Found library systems via libby autocomplete."
     );
     Ok(libraries)
 }
@@ -414,7 +426,7 @@ pub async fn get_library_from_website_id(website_id: String) -> Result<Library, 
     info!(
         website_id = website_id,
         method = "get_library_from_website_id",
-        "Found library system!!"
+        "Found library system!"
     );
     let search_lib = SearchLibrary {
         system_name: name.to_string(),

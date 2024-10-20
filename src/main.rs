@@ -2,23 +2,22 @@
 #[tokio::main]
 async fn main() {
     use axum::Router;
+    use dotenv::dotenv;
     use leptos::*;
     use leptos_axum::{generate_route_list, LeptosRoutes};
     use libbyreads_rs::app::*;
     use libbyreads_rs::fileserv::file_and_error_handler;
-    use tracing_subscriber;
-    use opentelemetry_otlp::WithExportConfig;
-    use opentelemetry_sdk::Resource;
-    use opentelemetry_sdk::logs::LoggerProvider;
-    use opentelemetry_appender_tracing::layer;
     use opentelemetry::KeyValue;
-    use tracing::info;
+    use opentelemetry_appender_tracing::layer;
+    use opentelemetry_otlp::WithExportConfig;
+    use opentelemetry_sdk::logs::LoggerProvider;
+    use opentelemetry_sdk::Resource;
     use std::env;
     use std::time::Duration;
-    use tracing_subscriber::EnvFilter;
+    use tracing::info;
+    use tracing_subscriber;
     use tracing_subscriber::layer::SubscriberExt as _;
-    use dotenv::dotenv;
-
+    use tracing_subscriber::EnvFilter;
 
     dotenv().ok();
 
@@ -27,7 +26,8 @@ async fn main() {
     // tracing_subscriber::fmt::init();
 
     let export_config = opentelemetry_otlp::ExportConfig {
-        endpoint: env::var("HONEYCOMB_LOG_API_ENDPOINT").expect("HONEYCOMB_LOG_API_ENDPOINT not set"),
+        endpoint: env::var("HONEYCOMB_LOG_API_ENDPOINT")
+            .expect("HONEYCOMB_LOG_API_ENDPOINT not set"),
         protocol: opentelemetry_otlp::Protocol::HttpBinary,
         timeout: Duration::from_secs(3),
     };
@@ -36,15 +36,21 @@ async fn main() {
         .with_export_config(export_config)
         .with_headers({
             let mut headers = std::collections::HashMap::new();
-            headers.insert("x-honeycomb-team".to_string(), env::var("HONEYCOMB_API_KEY").expect("HONEYCOMB_API_KEY not set"));
-            headers.insert("x-honeycomb-dataset".to_string(), env::var("HONEYCOMB_DATASET").expect("HONEYCOMB_DATASET not set"));
+            headers.insert(
+                "x-honeycomb-team".to_string(),
+                env::var("HONEYCOMB_API_KEY").expect("HONEYCOMB_API_KEY not set"),
+            );
+            headers.insert(
+                "x-honeycomb-dataset".to_string(),
+                env::var("HONEYCOMB_DATASET").expect("HONEYCOMB_DATASET not set"),
+            );
             headers
         })
         .build_log_exporter()
         .unwrap();
     let resource = Resource::new(vec![
-       KeyValue::new("service.name", "libbyreads"),
-       KeyValue::new("service.version", "0.1.0"),
+        KeyValue::new("service.name", "libbyreads"),
+        KeyValue::new("service.version", "0.1.0"),
     ]);
     let logger_provider = LoggerProvider::builder()
         .with_batch_exporter(log_exporter, opentelemetry_sdk::runtime::Tokio)
@@ -52,10 +58,11 @@ async fn main() {
         .build();
 
     let logger_layer = layer::OpenTelemetryTracingBridge::new(&logger_provider);
-    let env_filter_layer = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new("info")).unwrap();
+    let env_filter_layer = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new("info"))
+        .unwrap();
 
-    let subscriber = tracing_subscriber::registry()
-        .with(env_filter_layer);
+    let subscriber = tracing_subscriber::registry().with(env_filter_layer);
 
     tracing::subscriber::set_global_default(subscriber.with(logger_layer)).unwrap();
     info!("Starting server");
