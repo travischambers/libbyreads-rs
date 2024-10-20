@@ -619,8 +619,8 @@ fn DisplaySelectedLibraries(
         <table>
             <thead>
             <tr>
-                <th style="width: 80%">"Library"</th>
-                <th style="width: 20%">"Action"</th>
+                <th style="width: 70%">"Library"</th>
+                <th style="width: 30%">"Action"</th>
             </tr>
             </thead>
             <tbody>
@@ -1002,10 +1002,12 @@ fn HomePage() -> impl IntoView {
                 }
             }
             <div>
-                <LibrarySearch search_libraries=search_libraries set_search_libraries=set_search_libraries selected_library_website_ids=selected_library_website_ids />
-            </div>
-            <div>
-                <DisplaySelectedLibraries selected_libraries=selected_libraries selected_library_website_ids=selected_library_website_ids/>
+                <div>
+                    <LibrarySearch search_libraries=search_libraries set_search_libraries=set_search_libraries selected_library_website_ids=selected_library_website_ids />
+                </div>
+                <div>
+                    <DisplaySelectedLibraries selected_libraries=selected_libraries selected_library_website_ids=selected_library_website_ids/>
+                </div>
             </div>
             <button on:click=move |_| fetch_availability()>"Search"</button>
             // display summary of availability and progress bar
