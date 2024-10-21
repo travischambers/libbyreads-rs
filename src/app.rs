@@ -618,8 +618,8 @@ fn LibrarySearch(
         <table>
             <thead>
             <tr>
-                <th style="width: 70%">"Library"</th>
-                <th style="width: 30%">"Action"</th>
+                <th style="width: 65%; text-align: center;">"Library"</th>
+                <th style="width: 35%; text-align: center;">"Action"</th>
             </tr>
             </thead>
             <tbody>
@@ -632,13 +632,13 @@ fn LibrarySearch(
                     <td>
                     {if is_selected {
                         view! {
-                        <button on:click=move |_| {
+                        <button style="width: 100%;" on:click=move |_| {
                             remove_selected_library(library_clone.clone());
                         }>"Remove"</button>
                         }
                     } else {
                         view! {
-                        <button on:click=move |_| {
+                        <button style="width:100%;" on:click=move |_| {
                             add_selected_library(library_clone.clone());
                         }>"Add"</button>
                         }
@@ -668,8 +668,8 @@ fn DisplaySelectedLibraries(
         <table>
             <thead>
             <tr>
-                <th style="width: 70%">"Library"</th>
-                <th style="width: 30%">"Action"</th>
+                <th style="width: 65%; text-align: center;">"Library"</th>
+                <th style="width: 35%; text-align: center;">"Action"</th>
             </tr>
             </thead>
             <tbody>
@@ -679,7 +679,7 @@ fn DisplaySelectedLibraries(
                 <tr>
                     <td>{library.search_library.system_name.clone()}</td>
                     <td>
-                        <button on:click=move |_| {remove_selected_library(library_clone.search_library.clone());}>
+                        <button style="width: 100%;" on:click=move |_| {remove_selected_library(library_clone.search_library.clone());}>
                             "Remove"
                         </button>
                     </td>
@@ -1057,7 +1057,7 @@ fn HomePage() -> impl IntoView {
     view! {
             <h1>"LibbyReads"</h1>
             <p>"Search Libby for your Goodreads books" </p>
-            <div style="display: flex; align-items: center; gap: 10px;">
+            <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
                 <input
                     type="text"
                     placeholder="Goodreads user ID"
