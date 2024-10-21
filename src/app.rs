@@ -883,9 +883,14 @@ fn HomePage() -> impl IntoView {
     };
 
     create_effect(move |_| {
-        println!("create_effect fetch_books called");
-        logging::log!("create_effect fetch_books called");
         let shelf = selected_shelf.get();
+        // when a new shelf is selected, remove all existing progress and availability data
+        set_libby_progress.update(|progress| *progress = 0);
+        set_available_count.update(|available| *available = 0);
+        set_holdable_count.update(|holdable| *holdable = 0);
+        set_not_owned_count.update(|not_owned| *not_owned = 0);
+        set_availability.update(|availability| availability.clear());
+        set_books.update(|books| books.clear());
         // create_effects are called once on component mount
         if !shelf.is_empty() {
             fetch_books();
@@ -893,8 +898,6 @@ fn HomePage() -> impl IntoView {
     });
 
     let fetch_shelves = move || {
-        println!("Fetching shelves...");
-        logging::log!("Fetching shelves...");
         spawn_local(async move {
             match get_goodreads_shelves(user_id.get()).await {
                 Ok(found_shelves) => {
