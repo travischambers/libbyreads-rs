@@ -30,3 +30,6 @@ end2end/playwright-report/
 playwright/.cache/
 
 .env
+
+# manual file i keep locally for a list of IDs of people i test for
+goodreads_ids.csv
