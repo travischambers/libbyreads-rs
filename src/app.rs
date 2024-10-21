@@ -83,7 +83,10 @@ struct PageParams {
 }
 
 #[server(GetGoodreadsBooks, "/goodreads-books")]
-pub async fn get_goodreads_books(user_id: String) -> Result<Vec<GoodreadsBook>, ServerFnError> {
+pub async fn get_goodreads_books(
+    user_id: String,
+    shelf: String,
+) -> Result<Vec<GoodreadsBook>, ServerFnError> {
     let start = Instant::now();
 
     let books = Arc::new(Mutex::new(Vec::new()));
@@ -93,16 +96,21 @@ pub async fn get_goodreads_books(user_id: String) -> Result<Vec<GoodreadsBook>, 
     // sort=date_added sorts by the order the books were added
     // TODO: get per_page to work. right now i always get 20
     // per_page=500 gives us 500 books at once. we could do more, but probably not necessary
-    // TODO: make the shelf configurable via leptos multiselect dropdown
     let url = format!(
-        "https://goodreads.com/review/list/{}?print=true&shelf=to-read",
-        user_id
+        "https://goodreads.com/review/list/{}?print=true&shelf={}",
+        user_id, shelf
     );
-    info!(user_id = user_id, url = url, "Fetching initial page.");
+    info!(
+        user_id = user_id,
+        shelf = shelf,
+        url = url,
+        "Fetching initial page."
+    );
+
     // Parse the HTML document
-    // the Html struct is not Sync, so we can't share it between threads
-    // instead, we parse the document in a blocking tokio task
-    let last_page = {
+    let mut last_page = 1;
+
+    {
         let client = Client::new();
         let response = client.get(&url).send().await?.text().await?;
         let original_html = Html::parse_document(&response);
@@ -116,19 +124,21 @@ pub async fn get_goodreads_books(user_id: String) -> Result<Vec<GoodreadsBook>, 
         {
             return Err(ServerFnError::ServerError("Private profile".to_string()));
         }
-        // get the total number of pages
-        let pagination_selector = Selector::parse("#reviewPagination a").unwrap();
+        last_page = {
+            // get the total number of pages
+            let pagination_selector = Selector::parse("#reviewPagination a").unwrap();
 
-        // Find the highest number in the pagination links
-        let last_page = original_html
-            .select(&pagination_selector)
-            .filter_map(|element| element.text().collect::<String>().parse::<u32>().ok())
-            .max()
-            .unwrap_or(1); // If there are no pagination links, there is only one page
+            // Find the highest number in the pagination links
+            let last_page = original_html
+                .select(&pagination_selector)
+                .filter_map(|element| element.text().collect::<String>().parse::<u32>().ok())
+                .max()
+                .unwrap_or(1); // If there are no pagination links, there is only one page
 
-        // in rust, the last expression without a semicolon is implicitly returned
-        last_page
-    };
+            // in rust, the last expression without a semicolon is implicitly returned
+            last_page
+        };
+    }
 
     let initial_page_duration = start.elapsed();
     info!(
@@ -229,6 +239,45 @@ pub async fn get_goodreads_books(user_id: String) -> Result<Vec<GoodreadsBook>, 
         "Finished fetching all Goodreads pages."
     );
     Ok(books.clone())
+}
+
+#[server(GetGoodreadsShelves, "/goodreads-shelves")]
+pub async fn get_goodreads_shelves(user_id: String) -> Result<Vec<String>, ServerFnError> {
+    info!(user_id = user_id, "Fetching Goodreads shelves.");
+    let url = format!("https://goodreads.com/review/list/{}", user_id);
+    let client = Client::new();
+    let response = client.get(&url).send().await?.text().await?;
+    let document = Html::parse_document(&response);
+    let shelf_selector = Selector::parse(".userShelf a").unwrap();
+    // Create an empty vector to hold the shelves
+    let mut shelves = Vec::new();
+
+    // Iterate over each element that matches the selector
+    for element in document.select(&shelf_selector) {
+        // Get the href attribute
+        if let Some(href) = element.value().attr("href") {
+            // Split on "shelf=" and get the part after it
+            if let Some(shelf_name) = href.split("shelf=").nth(1) {
+                // Split on any query parameters (in case there are any)
+                let shelf_name_cleaned = shelf_name
+                    .split('&')
+                    .next()
+                    .unwrap_or(shelf_name)
+                    .to_lowercase();
+                // Push the cleaned shelf name to the vector
+                shelves.push(shelf_name_cleaned.to_string());
+            }
+        }
+    }
+    if !shelves.contains(&"all".to_string()) {
+        shelves.insert(0, "all".to_string());
+    }
+    info!(
+        shelves = ?shelves,
+        user_id = user_id,
+        "Finished fetching Goodreads shelves."
+    );
+    Ok(shelves)
 }
 
 #[server(GetLibbyAvailability, "/libby-availability")]
@@ -750,7 +799,9 @@ fn HomePage() -> impl IntoView {
     let is_private_profile = create_rw_signal(false);
     let (sort_by, set_sort_by) = create_signal(String::from("availability"));
     let (sort_order, set_sort_order) = create_signal(String::from("asc"));
-    let (user_id, set_user_id) = create_signal(String::new());
+    let user_id = create_rw_signal(String::new());
+    let shelves = create_rw_signal(Vec::<String>::new());
+    let selected_shelf = create_rw_signal(String::new());
     let (search_libraries, set_search_libraries) = create_signal(Vec::<SearchLibrary>::new());
 
     let selected_library_website_ids = create_rw_signal(Vec::<String>::new());
@@ -815,8 +866,9 @@ fn HomePage() -> impl IntoView {
 
     let fetch_books = move || {
         let user_id = user_id.get();
+        let selected_shelf = selected_shelf.get();
         spawn_local(async move {
-            match get_goodreads_books(user_id).await {
+            match get_goodreads_books(user_id, selected_shelf).await {
                 Ok(fetched_books) => set_books.set(fetched_books),
                 Err(e) => {
                     is_private_profile.update(|is_private| {
@@ -830,6 +882,45 @@ fn HomePage() -> impl IntoView {
         });
     };
 
+    create_effect(move |_| {
+        println!("create_effect fetch_books called");
+        logging::log!("create_effect fetch_books called");
+        let shelf = selected_shelf.get();
+        // create_effects are called once on component mount
+        if !shelf.is_empty() {
+            fetch_books();
+        }
+    });
+
+    let fetch_shelves = move || {
+        println!("Fetching shelves...");
+        logging::log!("Fetching shelves...");
+        spawn_local(async move {
+            match get_goodreads_shelves(user_id.get()).await {
+                Ok(found_shelves) => {
+                    logging::log!("Found shelves: {:?}", found_shelves);
+                    shelves.update(|shelves| {
+                        *shelves = found_shelves.clone();
+                    });
+                    // force select to-read shelf
+                    selected_shelf.update(|shelf| *shelf = "to-read".to_string());
+                }
+                Err(err) => {
+                    logging::error!("Error fetching shelves. {}", err);
+                }
+            }
+        });
+    };
+
+    create_effect(move |_| {
+        println!("create_effect fetch_shelves called");
+        logging::log!("create_effect fetch_shelves called");
+        let user_id = user_id.get();
+        if !user_id.is_empty() {
+            fetch_shelves();
+        }
+    });
+
     let query = use_query::<PageParams>();
     let user_id_from_url = move || {
         query.with(|query| {
@@ -841,9 +932,10 @@ fn HomePage() -> impl IntoView {
     };
     let user_id_from_url_value = user_id_from_url();
     if !user_id_from_url_value.is_empty() {
-        set_user_id(user_id_from_url_value);
-        fetch_books();
-    }
+        logging::log!("User id was set from url.");
+        user_id.update(|new_id| *new_id = user_id_from_url_value);
+        fetch_shelves();
+    };
 
     // get a list of website ids from the url query param, if it exists
     let selected_library_website_ids_from_url = move || {
@@ -964,17 +1056,33 @@ fn HomePage() -> impl IntoView {
 
     view! {
             <h1>"LibbyReads"</h1>
-            <p>"Fetch books from your Goodreads to-read shelf and check their availability at your libraries via Libby." </p>
-            <input
-                type="text"
-                placeholder="Goodreads user ID"
-                value=user_id.get()
-                on:input=move |e| {
-                    set_user_id(event_target_value(&e));
-                    fetch_books();
-                }
-                title="Goodreads user ID"
-            />
+            <p>"Search Libby for your Goodreads books" </p>
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <input
+                    type="text"
+                    placeholder="Goodreads user ID"
+                    value=user_id.get()
+                    on:input=move |e| {
+                        logging::log!("User ID input: {:?}", event_target_value(&e));
+                        user_id.update(|new_id| *new_id = event_target_value(&e));
+                    }
+                    title="Goodreads user ID"
+                />
+                <select
+                    on:input=move |e| {
+                        selected_shelf.set(event_target_value(&e));
+                    }
+                >
+                    <option value="">"Select a shelf"</option>
+                    {move || {
+                        shelves.get().iter().map(|shelf| {
+                            view! {
+                                <option value={shelf.clone()} selected={*shelf == "to-read"}>{shelf.clone()}</option>
+                            }
+                        }).collect::<Vec<_>>()
+                    }}
+                </select>
+            </div>
             {
                 move || {
                 let goodreads_url = format!("https://goodreads.com/review/list/{}?shelf=to-read", user_id.get());
